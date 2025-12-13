@@ -5,5 +5,3 @@ scikit-learn
 joblib
 plotly
 matplotlib
-shap
-openpyxl
