@@ -2,61 +2,82 @@ import streamlit as st
 import pandas as pd
 import joblib
 import numpy as np
-import shap
 import plotly.express as px
 import plotly.graph_objects as go
-import matplotlib.pyplot as plt
 from datetime import date
 
-# ==================================================
+# --------------------------------------------------
 # Page Config
-# ==================================================
+# --------------------------------------------------
 st.set_page_config(page_title="SecureVision", layout="wide")
 
-# ==================================================
-# Style
-# ==================================================
+# ---------------- Custom Colors ----------------
 st.markdown("""
 <style>
-.stApp { background-color: #f8fafc; }
-.card {
-    background: white;
+.stApp {
+    background-color: #f8fafc;
+}
+.kpi-box {
     padding: 20px;
     border-radius: 12px;
-    box-shadow: 0 4px 10px rgba(0,0,0,.08);
+    color: white;
+    text-align: center;
 }
+.kpi-blue { background: linear-gradient(135deg, #1e3c72, #2a5298); }
+.kpi-red { background: linear-gradient(135deg, #c31432, #240b36); }
+.kpi-orange { background: linear-gradient(135deg, #f7971e, #ffd200); color:black; }
+.kpi-green { background: linear-gradient(135deg, #11998e, #38ef7d); }
 </style>
 """, unsafe_allow_html=True)
 
-# ==================================================
+# --------------------------------------------------
 # Load Model
-# ==================================================
+# --------------------------------------------------
 @st.cache_resource
 def load_model():
     return joblib.load("incident_model.pkl")
 
 model = load_model()
-explainer = shap.TreeExplainer(model)
 
-# ==================================================
+# --------------------------------------------------
+# AI Explanation
+# --------------------------------------------------
+def explain_incident(row):
+    reasons = []
+    if row["severity"] in ["High", "Critical"]:
+        reasons.append(f"Severity {row['severity']}")
+    if row["ioc_reputation_score"] >= 70:
+        reasons.append(f"IOC {int(row['ioc_reputation_score'])}")
+    if row["num_vulns_asset"] >= 10:
+        reasons.append(f"{int(row['num_vulns_asset'])} vulnerabilities")
+    if row["asset_criticality"] >= 4:
+        reasons.append("critical asset")
+    if row["past_alerts_user_30d"] >= 7:
+        reasons.append("repeated alerts")
+    return " + ".join(reasons) if reasons else "No high-risk indicators detected"
+
+# --------------------------------------------------
 # Header
-# ==================================================
-st.title("🔐 SecureVision")
+# --------------------------------------------------
+st.markdown("## 🔐 SecureVision")
 st.caption(f"Incident Risk Intelligence Platform — {date.today()}")
 
-# ==================================================
-# Sidebar Inputs
-# ==================================================
+# --------------------------------------------------
+# Sidebar
+# --------------------------------------------------
 st.sidebar.header("Alert Configuration")
 
 alert_source = st.sidebar.selectbox(
-    "Alert Source", ["SIEM", "AV", "email", "firewall", "third_party"]
+    "Alert Source",
+    ["SIEM", "AV", "email", "firewall", "third_party"]
 )
 alert_type = st.sidebar.selectbox(
-    "Alert Type", ["phishing", "malware", "brute_force", "port_scan", "suspicious_login"]
+    "Alert Type",
+    ["phishing", "malware", "brute_force", "port_scan", "suspicious_login"]
 )
 severity = st.sidebar.selectbox(
-    "Severity", ["Low", "Medium", "High", "Critical"]
+    "Severity",
+    ["Low", "Medium", "High", "Critical"]
 )
 asset_criticality = st.sidebar.slider("Asset Criticality", 1, 5, 3)
 ioc_score = st.sidebar.slider("IOC Reputation Score", 0, 100, 60)
@@ -65,65 +86,10 @@ past_alerts = st.sidebar.slider("Past Alerts (30 days)", 0, 20, 3)
 
 run = st.sidebar.button("🚀 Run Analysis")
 
-# ==================================================
-# Helper: Get SHAP row robustly (works across SHAP versions)
-# ==================================================
-def extract_shap_row(shap_values):
-    """
-    Returns a 1D SHAP vector for the positive class (if available),
-    otherwise returns the single output vector.
-    Handles list outputs and different array shapes safely.
-    """
-    # Case 1: list => usually multiclass or binary returning [class0, class1]
-    if isinstance(shap_values, list):
-        # Prefer class 1 if exists
-        if len(shap_values) > 1:
-            arr = shap_values[1]
-        else:
-            arr = shap_values[0]
-    else:
-        arr = shap_values
-
-    arr = np.array(arr)
-
-    # arr could be: (1, n_features) or (n_features,) or (n_samples, n_features)
-    if arr.ndim == 3:
-        # sometimes: (classes, samples, features) - take first sample
-        arr = arr[0]
-
-    if arr.ndim == 2:
-        # take first sample
-        arr = arr[0]
-
-    # now flatten to 1D
-    return arr.flatten()
-
-def build_reason(shap_row_1d, columns, top_n=3):
-    """
-    Build top-N reason strings + dataframe for plotting.
-    Ensures shap_row is 1D.
-    """
-    shap_row_1d = np.array(shap_row_1d).flatten()
-
-    df_imp = pd.DataFrame({
-        "feature": list(columns),
-        "impact": shap_row_1d
-    })
-
-    df_imp = df_imp.sort_values("impact", key=abs, ascending=False).head(top_n)
-
-    reasons = []
-    for _, r in df_imp.iterrows():
-        arrow = "⬆️" if r["impact"] > 0 else "⬇️"
-        reasons.append(f"{r['feature'].replace('_',' ').title()} {arrow}")
-
-    return reasons, df_imp
-
-# ==================================================
+# --------------------------------------------------
 # Run Analysis
-# ==================================================
+# --------------------------------------------------
 if run:
-    # ---- Create simulated alert batch
     base = {
         "alert_source": alert_source,
         "alert_type": alert_type,
@@ -142,98 +108,83 @@ if run:
     }
 
     df = pd.concat([pd.DataFrame([base])] * 25, ignore_index=True)
+    df["time_index"] = range(len(df))
 
-    # ---- Encode
-    X = pd.get_dummies(df, drop_first=True)
-    X = X.reindex(columns=model.feature_names_in_, fill_value=0)
+    df_enc = pd.get_dummies(df, drop_first=True)
+    df_enc = df_enc.reindex(columns=model.feature_names_in_, fill_value=0)
 
-    # ---- Predict
-    df["Prediction"] = model.predict(X)
-    df["Risk Score"] = model.predict_proba(X)[:, 1]
+    preds = model.predict(df_enc)
+    probs = model.predict_proba(df_enc)[:, 1]
+
+    df["Prediction"] = preds
+    df["Risk Score"] = probs
+    df["AI Explanation"] = df.apply(explain_incident, axis=1)
 
     df["Risk Level"] = pd.cut(
-        df["Risk Score"],
-        [0, .3, .6, .8, 1],
+        df["Risk Score"], [0, .3, .6, .8, 1],
         labels=["Low", "Medium", "High", "Critical"]
     )
 
-    # ==================================================
-    # KPIs
-    # ==================================================
+    # ---------------- KPIs ----------------
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total Alerts", len(df))
-    c2.metric("Incidents", int((df["Prediction"] == 1).sum()))
-    c3.metric("High / Critical", int(df["Risk Level"].isin(["High", "Critical"]).sum()))
-    c4.metric("Avg Risk", round(df["Risk Score"].mean(), 2))
+    c1.markdown(f"<div class='kpi-box kpi-blue'><h3>Total Alerts</h3><h2>{len(df)}</h2></div>", unsafe_allow_html=True)
+    c2.markdown(f"<div class='kpi-box kpi-red'><h3>Incidents</h3><h2>{int((df['Prediction']==1).sum())}</h2></div>", unsafe_allow_html=True)
+    c3.markdown(f"<div class='kpi-box kpi-orange'><h3>High / Critical</h3><h2>{int(df['Risk Level'].isin(['High','Critical']).sum())}</h2></div>", unsafe_allow_html=True)
+    c4.markdown(f"<div class='kpi-box kpi-green'><h3>Avg Risk</h3><h2>{round(df['Risk Score'].mean(),2)}</h2></div>", unsafe_allow_html=True)
 
     st.divider()
 
-    # ==================================================
-    # Charts
-    # ==================================================
+    # ---------------- Charts ----------------
+    gauge = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=df["Risk Score"].mean(),
+        title={"text": "Incident Prediction"},
+        gauge={
+            "axis": {"range": [0, 1]},
+            "steps": [
+                {"range": [0, 0.3], "color": "#4caf50"},
+                {"range": [0.3, 0.6], "color": "#ffeb3b"},
+                {"range": [0.6, 0.8], "color": "#ff9800"},
+                {"range": [0.8, 1], "color": "#f44336"},
+            ]
+        }
+    ))
+
+    pie = px.pie(
+        df,
+        names="Risk Level",
+        title="Risk Distribution",
+        color="Risk Level",
+        color_discrete_map={
+            "Low": "#4caf50",
+            "Medium": "#ffeb3b",
+            "High": "#ff9800",
+            "Critical": "#f44336"
+        }
+    )
+
+    alert_counts = df["alert_type"].value_counts().reset_index()
+    alert_counts.columns = ["Alert Type", "Count"]
+    bar = px.bar(
+        alert_counts,
+        x="Alert Type",
+        y="Count",
+        title="Alert Types",
+        color="Alert Type"
+    )
+
     col1, col2, col3 = st.columns(3)
+    col1.plotly_chart(gauge, use_container_width=True)
+    col2.plotly_chart(pie, use_container_width=True)
+    col3.plotly_chart(bar, use_container_width=True)
 
-    with col1:
-        fig = go.Figure(go.Indicator(
-            mode="gauge+number",
-            value=float(df["Risk Score"].mean()),
-            gauge={"axis": {"range": [0, 1]}}
-        ))
-        st.plotly_chart(fig, use_container_width=True)
+    # ---------------- Explanation ----------------
+    st.subheader("🧠 AI Explanation")
+    st.success(df.sort_values("Risk Score", ascending=False)["AI Explanation"].iloc[0])
 
-    with col2:
-        st.plotly_chart(px.pie(df, names="Risk Level", title="Risk Distribution"),
-                        use_container_width=True)
-
-    with col3:
-        ac = df["alert_type"].value_counts().reset_index()
-        ac.columns = ["Alert Type", "Count"]
-        st.plotly_chart(px.bar(ac, x="Alert Type", y="Count", title="Alert Types"),
-                        use_container_width=True)
-
-    # ==================================================
-    # SHAP Explanation
-    # ==================================================
-    st.subheader("🧠 AI Decision Explanation")
-
-    top_idx = df["Risk Score"].idxmax()
-    x_one = X.loc[[top_idx]]
-
-    shap_values = explainer.shap_values(x_one)
-    shap_row = extract_shap_row(shap_values)
-
-    reasons, top_df = build_reason(shap_row, X.columns, top_n=3)
-
-    st.markdown(f"""
-    <div class="card">
-    <b>Top contributing factors:</b><br><br>
-    • {"<br>• ".join(reasons)}
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.progress(float(df.loc[top_idx, "Risk Score"]))
-    st.caption(f"Incident Risk Score: **{round(float(df.loc[top_idx, 'Risk Score']), 2)}**")
-
-    # Clear SHAP bar chart
-    with st.expander("📊 Feature Impact Breakdown (Top 8)"):
-        full_imp = pd.DataFrame({
-            "feature": list(X.columns),
-            "impact": shap_row
-        }).sort_values("impact", key=abs, ascending=False).head(8)
-
-        fig2, ax = plt.subplots()
-        colors = ["#ef4444" if v > 0 else "#22c55e" for v in full_imp["impact"]]
-        ax.barh(full_imp["feature"], full_imp["impact"], color=colors)
-        ax.set_title("SHAP Feature Impact")
-        ax.invert_yaxis()
-        st.pyplot(fig2)
-
-    # ==================================================
-    # Table
-    # ==================================================
+    # ---------------- Table ----------------
     st.subheader("🚨 Alerts")
     st.dataframe(df.sort_values("Risk Score", ascending=False), use_container_width=True)
 
 else:
-    st.info("⬅️ Configure inputs and click **Run Analysis**")
- 
+    st.info("⬅️ Configure alerts and click **Run Analysis**")
