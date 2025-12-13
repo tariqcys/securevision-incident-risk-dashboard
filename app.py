@@ -2,8 +2,10 @@ import streamlit as st
 import pandas as pd
 import joblib
 import numpy as np
+import shap
 import plotly.express as px
 import plotly.graph_objects as go
+import matplotlib.pyplot as plt
 from datetime import date
 
 # --------------------------------------------------
@@ -38,23 +40,22 @@ def load_model():
     return joblib.load("incident_model.pkl")
 
 model = load_model()
+explainer = shap.TreeExplainer(model)
 
 # --------------------------------------------------
-# AI Explanation
+# SHAP Text Explanation
 # --------------------------------------------------
-def explain_incident(row):
+def generate_incident_reason(shap_row, feature_names, top_n=3):
+    impact = list(zip(feature_names, shap_row))
+    impact = sorted(impact, key=lambda x: abs(x[1]), reverse=True)
+
     reasons = []
-    if row["severity"] in ["High", "Critical"]:
-        reasons.append(f"Severity {row['severity']}")
-    if row["ioc_reputation_score"] >= 70:
-        reasons.append(f"IOC {int(row['ioc_reputation_score'])}")
-    if row["num_vulns_asset"] >= 10:
-        reasons.append(f"{int(row['num_vulns_asset'])} vulnerabilities")
-    if row["asset_criticality"] >= 4:
-        reasons.append("critical asset")
-    if row["past_alerts_user_30d"] >= 7:
-        reasons.append("repeated alerts")
-    return " + ".join(reasons) if reasons else "No high-risk indicators detected"
+    for feat, val in impact[:top_n]:
+        direction = "⬆️ زاد الخطورة" if val > 0 else "⬇️ خفّض الخطورة"
+        clean_feat = feat.replace("_", " ").title()
+        reasons.append(f"{clean_feat} {direction}")
+
+    return reasons
 
 # --------------------------------------------------
 # Header
@@ -108,17 +109,13 @@ if run:
     }
 
     df = pd.concat([pd.DataFrame([base])] * 25, ignore_index=True)
-    df["time_index"] = range(len(df))
 
-    df_enc = pd.get_dummies(df, drop_first=True)
-    df_enc = df_enc.reindex(columns=model.feature_names_in_, fill_value=0)
+    # Encode
+    X = pd.get_dummies(df, drop_first=True)
+    X = X.reindex(columns=model.feature_names_in_, fill_value=0)
 
-    preds = model.predict(df_enc)
-    probs = model.predict_proba(df_enc)[:, 1]
-
-    df["Prediction"] = preds
-    df["Risk Score"] = probs
-    df["AI Explanation"] = df.apply(explain_incident, axis=1)
+    df["Prediction"] = model.predict(X)
+    df["Risk Score"] = model.predict_proba(X)[:, 1]
 
     df["Risk Level"] = pd.cut(
         df["Risk Score"], [0, .3, .6, .8, 1],
@@ -139,48 +136,62 @@ if run:
         mode="gauge+number",
         value=df["Risk Score"].mean(),
         title={"text": "Incident Prediction"},
-        gauge={
-            "axis": {"range": [0, 1]},
-            "steps": [
-                {"range": [0, 0.3], "color": "#4caf50"},
-                {"range": [0.3, 0.6], "color": "#ffeb3b"},
-                {"range": [0.6, 0.8], "color": "#ff9800"},
-                {"range": [0.8, 1], "color": "#f44336"},
-            ]
-        }
+        gauge={"axis": {"range": [0, 1]}}
     ))
 
-    pie = px.pie(
-        df,
-        names="Risk Level",
-        title="Risk Distribution",
-        color="Risk Level",
-        color_discrete_map={
-            "Low": "#4caf50",
-            "Medium": "#ffeb3b",
-            "High": "#ff9800",
-            "Critical": "#f44336"
-        }
-    )
-
-    alert_counts = df["alert_type"].value_counts().reset_index()
-    alert_counts.columns = ["Alert Type", "Count"]
-    bar = px.bar(
-        alert_counts,
-        x="Alert Type",
-        y="Count",
-        title="Alert Types",
-        color="Alert Type"
-    )
+    pie = px.pie(df, names="Risk Level", title="Risk Distribution")
+    bar = px.bar(df["alert_type"].value_counts().reset_index(),
+                 x="index", y="alert_type", title="Alert Types")
 
     col1, col2, col3 = st.columns(3)
     col1.plotly_chart(gauge, use_container_width=True)
     col2.plotly_chart(pie, use_container_width=True)
     col3.plotly_chart(bar, use_container_width=True)
 
-    # ---------------- Explanation ----------------
-    st.subheader("🧠 AI Explanation")
-    st.success(df.sort_values("Risk Score", ascending=False)["AI Explanation"].iloc[0])
+    # ---------------- SHAP Visual Explanation ----------------
+    st.subheader("🧠 Why this alert is risky")
+
+    top_idx = df["Risk Score"].idxmax()
+    shap_values = explainer.shap_values(X.loc[[top_idx]])
+
+    reasons = generate_incident_reason(
+        shap_values[1][0],
+        X.columns
+    )
+
+    # Explanation Card
+    st.markdown(f"""
+    <div style="
+        background: linear-gradient(135deg, #ffffff, #f1f5f9);
+        border-left: 6px solid #6366f1;
+        padding: 20px;
+        border-radius: 12px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+        font-size: 16px;
+    ">
+    <b>Top contributing factors:</b><br><br>
+    • {"<br>• ".join(reasons)}
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Risk Bar
+    st.markdown("### 🔥 Overall Risk Level")
+    st.progress(float(df.loc[top_idx, "Risk Score"]))
+    st.caption(f"Incident Risk Score: **{round(df.loc[top_idx, 'Risk Score'], 2)}**")
+
+    # SHAP Bar Chart (Clear)
+    with st.expander("📊 Feature Impact Breakdown"):
+        shap_df = pd.DataFrame({
+            "Feature": X.columns,
+            "Impact": shap_values[1][0]
+        }).sort_values("Impact", key=abs, ascending=False).head(8)
+
+        fig, ax = plt.subplots()
+        colors = ["#ef4444" if v > 0 else "#22c55e" for v in shap_df["Impact"]]
+        ax.barh(shap_df["Feature"], shap_df["Impact"], color=colors)
+        ax.set_title("SHAP Feature Impact")
+        ax.invert_yaxis()
+        st.pyplot(fig)
 
     # ---------------- Table ----------------
     st.subheader("🚨 Alerts")
@@ -188,4 +199,3 @@ if run:
 
 else:
     st.info("⬅️ Configure alerts and click **Run Analysis**")
-
