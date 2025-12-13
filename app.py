@@ -108,12 +108,14 @@ if run:
         "false_positive_rate_source": round(np.random.uniform(0, 1), 2),
     }
 
+    # simulate batch of alerts
     df = pd.concat([pd.DataFrame([base])] * 25, ignore_index=True)
 
-    # Encode
+    # Encode features
     X = pd.get_dummies(df, drop_first=True)
     X = X.reindex(columns=model.feature_names_in_, fill_value=0)
 
+    # Predictions
     df["Prediction"] = model.predict(X)
     df["Risk Score"] = model.predict_proba(X)[:, 1]
 
@@ -140,8 +142,17 @@ if run:
     ))
 
     pie = px.pie(df, names="Risk Level", title="Risk Distribution")
-    bar = px.bar(df["alert_type"].value_counts().reset_index(),
-                 x="index", y="alert_type", title="Alert Types")
+
+    # ✅ FIXED BAR CHART
+    alert_counts = df["alert_type"].value_counts().reset_index()
+    alert_counts.columns = ["Alert Type", "Count"]
+
+    bar = px.bar(
+        alert_counts,
+        x="Alert Type",
+        y="Count",
+        title="Alert Types"
+    )
 
     col1, col2, col3 = st.columns(3)
     col1.plotly_chart(gauge, use_container_width=True)
@@ -159,7 +170,6 @@ if run:
         X.columns
     )
 
-    # Explanation Card
     st.markdown(f"""
     <div style="
         background: linear-gradient(135deg, #ffffff, #f1f5f9);
@@ -174,12 +184,10 @@ if run:
     </div>
     """, unsafe_allow_html=True)
 
-    # Risk Bar
     st.markdown("### 🔥 Overall Risk Level")
     st.progress(float(df.loc[top_idx, "Risk Score"]))
     st.caption(f"Incident Risk Score: **{round(df.loc[top_idx, 'Risk Score'], 2)}**")
 
-    # SHAP Bar Chart (Clear)
     with st.expander("📊 Feature Impact Breakdown"):
         shap_df = pd.DataFrame({
             "Feature": X.columns,
