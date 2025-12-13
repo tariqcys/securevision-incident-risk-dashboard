@@ -66,34 +66,63 @@ past_alerts = st.sidebar.slider("Past Alerts (30 days)", 0, 20, 3)
 run = st.sidebar.button("🚀 Run Analysis")
 
 # ==================================================
-# Helper: SHAP Explanation
+# Helper: Get SHAP row robustly (works across SHAP versions)
 # ==================================================
-def get_shap_row(shap_values):
+def extract_shap_row(shap_values):
     """
-    Handles SHAP output safely across versions
+    Returns a 1D SHAP vector for the positive class (if available),
+    otherwise returns the single output vector.
+    Handles list outputs and different array shapes safely.
     """
+    # Case 1: list => usually multiclass or binary returning [class0, class1]
     if isinstance(shap_values, list):
-        return shap_values[1][0]   # class 1
-    return shap_values[0]          # single output
+        # Prefer class 1 if exists
+        if len(shap_values) > 1:
+            arr = shap_values[1]
+        else:
+            arr = shap_values[0]
+    else:
+        arr = shap_values
 
-def build_reason(shap_row, columns, top_n=3):
-    df = pd.DataFrame({
-        "feature": columns,
-        "impact": shap_row
-    }).sort_values("impact", key=abs, ascending=False).head(top_n)
+    arr = np.array(arr)
+
+    # arr could be: (1, n_features) or (n_features,) or (n_samples, n_features)
+    if arr.ndim == 3:
+        # sometimes: (classes, samples, features) - take first sample
+        arr = arr[0]
+
+    if arr.ndim == 2:
+        # take first sample
+        arr = arr[0]
+
+    # now flatten to 1D
+    return arr.flatten()
+
+def build_reason(shap_row_1d, columns, top_n=3):
+    """
+    Build top-N reason strings + dataframe for plotting.
+    Ensures shap_row is 1D.
+    """
+    shap_row_1d = np.array(shap_row_1d).flatten()
+
+    df_imp = pd.DataFrame({
+        "feature": list(columns),
+        "impact": shap_row_1d
+    })
+
+    df_imp = df_imp.sort_values("impact", key=abs, ascending=False).head(top_n)
 
     reasons = []
-    for _, r in df.iterrows():
+    for _, r in df_imp.iterrows():
         arrow = "⬆️" if r["impact"] > 0 else "⬇️"
         reasons.append(f"{r['feature'].replace('_',' ').title()} {arrow}")
 
-    return reasons, df
+    return reasons, df_imp
 
 # ==================================================
 # Run Analysis
 # ==================================================
 if run:
-
     # ---- Create simulated alert batch
     base = {
         "alert_source": alert_source,
@@ -147,18 +176,20 @@ if run:
     with col1:
         fig = go.Figure(go.Indicator(
             mode="gauge+number",
-            value=df["Risk Score"].mean(),
+            value=float(df["Risk Score"].mean()),
             gauge={"axis": {"range": [0, 1]}}
         ))
         st.plotly_chart(fig, use_container_width=True)
 
     with col2:
-        st.plotly_chart(px.pie(df, names="Risk Level"), use_container_width=True)
+        st.plotly_chart(px.pie(df, names="Risk Level", title="Risk Distribution"),
+                        use_container_width=True)
 
     with col3:
         ac = df["alert_type"].value_counts().reset_index()
         ac.columns = ["Alert Type", "Count"]
-        st.plotly_chart(px.bar(ac, x="Alert Type", y="Count"), use_container_width=True)
+        st.plotly_chart(px.bar(ac, x="Alert Type", y="Count", title="Alert Types"),
+                        use_container_width=True)
 
     # ==================================================
     # SHAP Explanation
@@ -166,10 +197,12 @@ if run:
     st.subheader("🧠 AI Decision Explanation")
 
     top_idx = df["Risk Score"].idxmax()
-    shap_values = explainer.shap_values(X.loc[[top_idx]])
-    shap_row = get_shap_row(shap_values)
+    x_one = X.loc[[top_idx]]
 
-    reasons, shap_df = build_reason(shap_row, X.columns)
+    shap_values = explainer.shap_values(x_one)
+    shap_row = extract_shap_row(shap_values)
+
+    reasons, top_df = build_reason(shap_row, X.columns, top_n=3)
 
     st.markdown(f"""
     <div class="card">
@@ -179,14 +212,21 @@ if run:
     """, unsafe_allow_html=True)
 
     st.progress(float(df.loc[top_idx, "Risk Score"]))
-    st.caption(f"Incident Risk Score: {round(df.loc[top_idx, 'Risk Score'], 2)}")
+    st.caption(f"Incident Risk Score: **{round(float(df.loc[top_idx, 'Risk Score']), 2)}**")
 
-    with st.expander("📊 Feature Impact Breakdown"):
-        fig, ax = plt.subplots()
-        colors = ["#ef4444" if v > 0 else "#22c55e" for v in shap_df["impact"]]
-        ax.barh(shap_df["feature"], shap_df["impact"], color=colors)
+    # Clear SHAP bar chart
+    with st.expander("📊 Feature Impact Breakdown (Top 8)"):
+        full_imp = pd.DataFrame({
+            "feature": list(X.columns),
+            "impact": shap_row
+        }).sort_values("impact", key=abs, ascending=False).head(8)
+
+        fig2, ax = plt.subplots()
+        colors = ["#ef4444" if v > 0 else "#22c55e" for v in full_imp["impact"]]
+        ax.barh(full_imp["feature"], full_imp["impact"], color=colors)
+        ax.set_title("SHAP Feature Impact")
         ax.invert_yaxis()
-        st.pyplot(fig)
+        st.pyplot(fig2)
 
     # ==================================================
     # Table
@@ -196,3 +236,4 @@ if run:
 
 else:
     st.info("⬅️ Configure inputs and click **Run Analysis**")
+ 
